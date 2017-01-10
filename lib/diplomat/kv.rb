@@ -1,7 +1,35 @@
 require 'base64'
 require 'faraday'
+require "mashie"
+
+Slash = Mashie::Slash unless defined? Slash
 
 module Diplomat
+  ClassMap = {}
+  ClassMap['String'] = 0
+  ClassMap['NilClass'] = 1
+  ClassMap['TrueClass'] = 2
+  ClassMap['FalseClass'] = 3
+  ClassMap['Symbol'] = 5
+  ClassMap['Array'] = 6
+  ClassMap['Hash'] = 7
+  ClassMap['Fixnum'] = 8
+  ClassMap['Float'] = 9
+  ClassMap['Bignum'] = 10
+  ClassMap['Rational'] = 11
+  ClassMap['Complex'] = 12
+  # add struct
+  ClassMap['Hashie::Clash'] = 31
+  ClassMap['Hashie:::Dash'] = 32
+  ClassMap['Hashie::Trash'] = 33
+  ClassMap['Hashie::Rash'] = 34
+  ClassMap['Hashie::Hash'] = 35
+  ClassMap['Hashie::Mash'] = 36
+  ClassMap['Mashie::Slash'] = 37
+
+  FlagMap = Hash.new
+  Diplomat::ClassMap.each{|k, v| Diplomat::FlagMap[v] = k}
+
   class Kv < Diplomat::RestClient
 
     include ApiOptions
@@ -20,8 +48,8 @@ module Diplomat
     # @option options [Boolean] :decode_values Return consul response with decoded values.
     # @option options [String] :separator List only up to a given separator. Only applies when combined with :keys option.
     # @option options [Boolean] :nil_values If to return keys/dirs with nil values
-    # @option options [Boolean] :convert_to_hash Take the data returned from consul and build a hash
     # @option options [Callable] :transformation funnction to invoke on keys values
+    # @option options [Boolan] :typelabel sets flags to value.class.to_i
     # @param not_found [Symbol] behaviour if the key doesn't exist;
     #   :reject with exception, :return degenerate value, or :wait for it to appear
     # @param found [Symbol] behaviour if the key does exist;
@@ -41,10 +69,11 @@ module Diplomat
     #   - R W - get the next value or a default
     #   - W X - get the first value only (must not have a current value)
     #   - W R - get the first or current value; always return something, but
-    #           block only when necessary
+    #       block only when necessary
     #   - W W - get the first or next value; wait until there is an update
+
     def get key, options=nil, not_found=:reject, found=:return
-      @key = key
+      @key, _, __= prepValue(key)
       @options = options
 
       url = ["/v1/kv/#{@key}"]
@@ -75,7 +104,7 @@ module Diplomat
             raise Diplomat::KeyAlreadyExists, key
           when :return
             @raw = raw
-            @raw = parse_body
+            parse_body
             if @options and @options[:modify_index]
               return @raw.first['ModifyIndex']
             end
@@ -99,7 +128,7 @@ module Diplomat
         req.url concat_url url
         req.options.timeout = 86400
       end
-      @raw = parse_body
+      parse_body
       return_value(return_nil_values, transformation)
     end
 
@@ -109,32 +138,43 @@ module Diplomat
     # @param options [Hash] the query params
     # @option options [Integer] :cas The modify index
     # @option options [String] :dc Target datacenter
+    # @option expand [Bool] : When hash-like value is encountered perform recursive puts on child keys
     # @return [Bool] Success or failure of the write (can fail in c-a-s mode)
+
     def put key, value, options=nil
-      @options = options
-      @raw = @conn.put do |req|
-        url = ["/v1/kv/#{key}"]
-        url += check_acl_token
-        url += use_cas(@options)
-        url += dc(@options)
-        req.url concat_url url
-        req.body = value
+      @options = options.nil? ? Slash.new : Slash.new(options)
+      #puts "Puts Value Class #{value.class} Lookup: #{Diplomat::ClassMap[value.class]}"
+      if value.respond_to?('keys')
+        value.each do |k, v|
+          self.put("#{key}/#{k}", v, options)
+        end
+      else
+        key, value, flags = prepValue(key, value)
+        #puts "Puts value type: #{value.class}"
+        @raw = @conn.put do |req|
+          url = ["/v1/kv/#{key}"]
+          url += check_acl_token
+          url += flags
+          url += use_cas(@options)
+          url += dc(@options)
+          req.url concat_url url
+          req.body = value
+        end
+        if @raw.body == "true"
+          @key   = key
+          @value = value
+        end
+        @raw.body == "true"
       end
-      if @raw.body == "true"
-        @key   = key
-        @value = value
-      end
-      @raw.body == "true"
     end
 
     # Delete a value by its key
     # @param key [String] the key
     # @param options [Hash] the query params
     # @option options [String] :dc Target datacenter
-    # @option options [Boolean] :recurse If to make recursive get or not
     # @return [OpenStruct]
     def delete key, options=nil
-      @key = key
+      @key, _, __= prepValue(key)
       @options = options
       url = ["/v1/kv/#{@key}"]
       url += recurse_get(@options)
@@ -144,6 +184,48 @@ module Diplomat
     end
 
     private
+
+    def name2flag(name)
+      Diplomat::ClassMap.has_key?(name) ? Diplomat::ClassMap[name] : 0
+    end
+
+    def prepValue(key, value=nil)
+      ipaddr = /\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b/
+      if key =~ ipaddr or key.include?('://')
+        nkey = key
+      else
+        if key[0] == '/'
+          key = key[1..-1]
+        end
+        if key.include?('..')
+          key.gsub!('..', '.')
+        end
+        nkey = key.gsub('.', '/')
+      end
+
+      flags = ["flags=#{name2flag(value.class)}"]
+
+      case name2flag(value.class)
+      when 1
+        value = 'nil'
+      when 2
+        value = 'true'
+      when 3
+        value = 'false'
+      when 5
+        value = value.to_sym
+      when 6
+        value = JSON.pretty_generate(value)
+      when 7, 31, 32, 33, 34, 35, 36, 37
+        value = JSON.pretty_generate(value)
+      when 8, 9, 10, 11, 12
+        value = value.to_s
+      else
+        value = value.to_s
+      end
+      #puts "prepValue: key: #{nkey} Value: #{value} Flag: #{flags}"
+      return nkey, value, flags
+    end
 
     def recurse_get(options)
       if options && options[:recurse] == true then ['recurse'] else [] end

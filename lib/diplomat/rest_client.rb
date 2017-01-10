@@ -1,5 +1,8 @@
 require 'faraday'
 require 'json'
+require 'mashie'
+
+Slash = Mashie::Slash unless defined? Slash
 
 module Diplomat
   class RestClient
@@ -135,8 +138,25 @@ module Diplomat
 
     # Parse the body, apply it to the raw attribute
     def parse_body
-      return JSON.parse(@raw.body) if @raw.status == 200
-      raise Diplomat::UnknownStatus, "status #{@raw.status}"
+      @raw = JSON.parse(@raw.body)
+    end
+
+    def jval(val)
+        begin
+            tmp = JSON.parse(val)
+            if tmp.class == ::Hash
+                val = Slash.new(tmp)
+            else
+                val = tmp
+            end
+        rescue JSON::ParserError
+        rescue JSON::GeneratorError
+        end
+        val
+    end
+
+    def flag2name(flag)
+        Diplomat::FlagMap.has_key?(flag) ? Diplomat::FlagMap[flag] : 'String'
     end
 
     # Return @raw with Value fields decoded
@@ -145,6 +165,24 @@ module Diplomat
       @raw.inject([]) do |acc, el|
         new_el = el.dup
         new_el["Value"] = (Base64.decode64(el["Value"]) rescue nil)
+        case new_el['Flags']
+        when 1
+            new_el["Value"] = nil
+        when 2
+            new_el["Value"] = true
+        when 3
+            new_el["Value"] = false
+        when 5
+            new_el["Value"] = :"#{new_el["Value"]}"
+        when 6
+            new_el["Value"] = jval(new_el["Value"])
+        when 7, 31, 32, 33, 34, 35, 36, 37
+            new_el["Value"] = (Object::const_get(Diplomat::flag2name(new_el['Flags'])).new(jval(new_el["Value"])) rescue {})
+        when 8, 10
+            new_el["Value"] = new_el["Value"].to_i
+        when 9, 11, 12
+            new_el["Value"] = (Object::const_get(Diplomat::flag2name(new_el['Flags'])).new(new_el['Value']) rescue new_el['Value'])
+        end
         acc << new_el
         acc
       end
@@ -152,19 +190,20 @@ module Diplomat
 
     # Get the key/value(s) from the raw output
     def return_value(nil_values=false, transformation=nil)
-      @value = decode_values
-      if @value.first.is_a? String
-        return @value
-      elsif @value.count == 1
-        @value = @value.first["Value"]
-        @value = transformation.call(@value) if transformation and not @value.nil?
-        return @value
-      else
-        @value = @value.map do |el|
-          el["Value"] = transformation.call(el["Value"]) if transformation and not el["Value"].nil?
-          { :key => el["Key"], :value => el["Value"] } if el["Value"] or nil_values
-        end.compact
-      end
+        @value = decode_values
+        if @value.first.is_a? String
+            return @value
+        elsif @value.count == 1
+            @value = @value.first["Value"]
+            @value = transformation.call(@value.first["Value"]) if transformation and not @value.first["Value"].nil?
+            return @value
+        else
+            @value = @value.map do |el|
+                el["Value"] = transformation.call(el["Value"]) if transformation and not el["Value"].nil?
+                {:Key => el["Key"], :Value => el["Value"] } if el["Value"] or nil_values
+            end.compact
+        end
+        @value
     end
 
     # Get the name and payload(s) from the raw output
@@ -174,6 +213,5 @@ module Diplomat
           :payload => (Base64.decode64(e["Payload"]) unless e["Payload"].nil?) }
       end
     end
-
   end
 end
