@@ -1,8 +1,8 @@
 require 'base64'
 require 'faraday'
-require "mashie"
-
-Slash = Mashie::Slash unless defined? Slash
+#require "mashie"
+#
+#Slash = Mashie::Slash unless defined? Slash
 
 module Diplomat
   ClassMap = {}
@@ -19,13 +19,6 @@ module Diplomat
   ClassMap['Rational'] = 11
   ClassMap['Complex'] = 12
   # add struct
-  ClassMap['Hashie::Clash'] = 31
-  ClassMap['Hashie:::Dash'] = 32
-  ClassMap['Hashie::Trash'] = 33
-  ClassMap['Hashie::Rash'] = 34
-  ClassMap['Hashie::Hash'] = 35
-  ClassMap['Hashie::Mash'] = 36
-  ClassMap['Mashie::Slash'] = 37
 
   FlagMap = Hash.new
   Diplomat::ClassMap.each{|k, v| Diplomat::FlagMap[v] = k}
